@@ -1,4 +1,4 @@
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use pin_project_lite::pin_project;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::ptr::null_mut;
@@ -84,6 +84,8 @@ impl InnerDecoder {
 
 impl Write for InnerDecoder {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let now = std::time::SystemTime::now();
+
         let code = unsafe {
             let buffer_struct = ARIB_STD_B25_BUFFER {
                 data: std::mem::transmute::<*const u8, *mut u8>(buf.as_ptr()),
@@ -91,6 +93,16 @@ impl Write for InnerDecoder {
             };
             self.dec.as_ref().put(&buffer_struct)
         };
+        let dur = now.elapsed().unwrap();
+        info!(
+            "Decoder write {}[byte]. time: {}[us]",
+            buf.len(),
+            dur.as_micros()
+        );
+
+        if dur > std::time::Duration::from_millis(50) {
+            std::thread::sleep(std::time::Duration::from_millis(250) - dur);
+        }
 
         match code {
             0 => Ok(buf.len()),
