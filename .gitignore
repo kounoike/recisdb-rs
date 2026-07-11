@@ -1,4 +1,5 @@
 /target
+/artifacts
 /.idea
 *.ts
 *.m2ts
