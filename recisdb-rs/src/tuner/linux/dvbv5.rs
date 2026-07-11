@@ -14,7 +14,8 @@ use dvbv5_sys::{
 };
 use futures_util::io::{AllowStdIo, BufReader};
 use futures_util::{AsyncBufRead, AsyncRead};
-use log::{error, info, warn};
+use log::{info, warn};
+use std::convert::TryInto;
 use std::ffi::c_uint;
 use std::fs::File;
 use std::io::Error;
@@ -44,16 +45,26 @@ impl UnTunedTuner {
                 Some(false),
             ) {
                 Ok(f) => f,
-                Err(_) => {
-                    error!("Cannot open the device. (Something went wrong while opening DVB frontend device)");
-                    std::process::exit(1);
+                Err(error) => {
+                    return Err(Error::new(
+                        std::io::ErrorKind::Other,
+                        format!(
+                            "Cannot open the device. (Something went wrong while opening DVB frontend device): {:?}",
+                            error
+                        ),
+                    ));
                 }
             };
             let d = match DmxFd::new(&frontend_id) {
                 Ok(d) => d,
-                Err(_) => {
-                    error!("Cannot open the device. (Something went wrong while opening DVB demux device)");
-                    std::process::exit(1);
+                Err(error) => {
+                    return Err(Error::new(
+                        std::io::ErrorKind::Other,
+                        format!(
+                            "Cannot open the device. (Something went wrong while opening DVB demux device): {:?}",
+                            error
+                        ),
+                    ));
                 }
             };
 
@@ -75,7 +86,7 @@ impl UnTunedTuner {
         let _result = unsafe {
             let p = self.frontend.get_c_ptr();
 
-            let raw_freq: DvbFreq = ch.ch_type.clone().into();
+            let raw_freq: DvbFreq = ch.ch_type.clone().try_into()?;
 
             match &ch.ch_type {
                 ChannelType::Terrestrial(..) | ChannelType::Catv(..) => {
@@ -149,8 +160,10 @@ impl UnTunedTuner {
                     dvbv5_sys::dvb_fe_set_parms(p)
                 }
                 _ => {
-                    error!("The specified channel is invalid.");
-                    std::process::exit(1);
+                    return Err(Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "The specified channel is invalid.",
+                    ));
                 }
             };
 
@@ -167,8 +180,7 @@ impl UnTunedTuner {
                 info!("Checking for the frontend lock...");
 
                 if counter > 5 {
-                    error!("No signal.");
-                    std::process::exit(-1)
+                    return Err(Error::new(std::io::ErrorKind::TimedOut, "No signal."));
                 } else {
                     counter += 1;
                 }

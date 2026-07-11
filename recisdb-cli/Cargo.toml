@@ -1,0 +1,55 @@
+[package]
+name = "recisdb-cli"
+version = "1.2.4"
+authors = ["maleicacid <maleicacid824+dev@gmail.com>"]
+edition = "2021"
+description = "CLI for recisdb"
+rust-version = "1.63"
+license = "MIT OR Apache-2.0"
+readme = "../README.md"
+repository = "https://github.com/kazuki0824/recisdb-rs.git"
+keywords = ["cli", "dtv", "japan", "broadcast", "b25"]
+categories = ["command-line-utilities"]
+
+[features]
+bg-static = ["recisdb/bg-static"]
+bg-runtime = ["recisdb/bg-runtime"]
+crypto = ["recisdb/crypto"]
+dvb = ["recisdb/dvb"]
+prioritized_card_reader = ["recisdb/prioritized_card_reader"]
+default = ["bg-runtime", "prioritized_card_reader"]
+
+[dependencies]
+chrono = "^0.4.26"
+clap = { version = "^4.4", features = ["derive"] }
+clap-num = "1"
+colored = "^3.0.0"
+ctrlc = { version = "^3.0", features = ["termination"] }
+env_logger = "^0.11.1"
+futures-executor = "0.3.26"
+futures-time = "3.0.0"
+futures-util = { version = "0.3.26", features = ["io"], default-features = false }
+indicatif = "0.17"
+log = "^0.4.17"
+b25-sys = { path = "../b25-sys" }
+recisdb = { path = "../recisdb-rs", package = "recisdb" }
+
+[package.metadata.deb]
+name = "recisdb"
+maintainer = "Kazuki Kuroda <maleicacid824+dev@gmail.com>"
+copyright = "2021-2022, Kazuki Kuroda  <maleicacid824+dev@gmail.com>"
+license-file = ["../recisdb-rs/LICENSE", "4"]
+extended-description = """\
+A simple command for ISDB-T / ISDB-S character device.
+recisdb can read both Unix chardev-based and BonDriver-based TV sources. """
+depends = "libpcsclite1, $auto"
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/recisdb", "usr/bin/", "755"],
+    ["../README.md", "usr/share/doc/recisdb/README", "644"]
+]
+
+[[bin]]
+name = "recisdb"
+path = "src/main.rs"

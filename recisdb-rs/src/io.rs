@@ -9,189 +9,200 @@ use std::task::{ready, Context, Poll};
 
 use futures_util::io::{AllowStdIo, BufReader};
 use futures_util::{AsyncBufRead, AsyncWrite};
-use log::{error, info, warn};
+use log::{info, warn};
 use pin_project_lite::pin_project;
 
 use b25_sys::{DecoderOptions, StreamDecoder};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferStopReason {
+    Completed,
+    InputEof,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferReport {
+    pub written_bytes: u64,
+    pub stop_reason: TransferStopReason,
+}
+
+type ProgressCallback = Arc<dyn Fn(u64) + Send + Sync + 'static>;
+
 pin_project! {
-    pub(crate) struct AsyncInOutTriple {
+    pub struct StreamTransfer {
         #[pin]
-        i: Box<dyn AsyncBufRead + Unpin + 'static>,
-        o: AllowStdIo<Box<dyn Write>>,
-        dec: RefCell<Option<BufReader<AllowStdIo<StreamDecoder>>>>,
-        amt: u64,
-        abandon_decoder: Option<bool>,
-        abort: Arc<AtomicBool>,
-        progress_tx: std::sync::mpsc::Sender<u64>,
+        input: Box<dyn AsyncBufRead + Unpin + 'static>,
+        output: AllowStdIo<Box<dyn Write>>,
+        decoder: RefCell<Option<BufReader<AllowStdIo<StreamDecoder>>>>,
+        written: u64,
+        finalize_reason: Option<TransferStopReason>,
+        stop_requested: Arc<AtomicBool>,
+        decoder_fallback: bool,
+        decoder_disabled: bool,
+        progress_callback: Option<ProgressCallback>,
+        last_progress: u64,
     }
 }
 
-impl AsyncInOutTriple {
-    const CAP: usize = 1600000;
+impl StreamTransfer {
+    const DECODER_BUFFER_CAPACITY: usize = 1_600_000;
+
     pub fn new(
-        i: Box<dyn AsyncBufRead + Unpin>,
-        o: Box<dyn Write>,
-        config: Option<DecoderOptions>,
-        continue_on_error: bool,
-    ) -> (Self, std::sync::mpsc::Receiver<u64>) {
-        let raw = config.and_then(|op| match StreamDecoder::new(op) {
-            Ok(raw) => Some(raw),
-            Err(e) if continue_on_error => {
-                error!("Failed to initialize the decoder. ({})", e);
-                info!("Disabling decoding and continue...");
-                // As a fallback, disable decoding and continue processing
-                None
-            }
-            Err(e) => {
-                error!("Error occurred while initializing the decoder. ({})", e);
-                error!("Make sure that the B-CAS card is certainly connected.");
-                std::process::exit(-1)
-            }
-        });
-
-        let dec = {
-            let buffered_decoder = raw
-                .map(AllowStdIo::new)
-                .map(|raw| BufReader::with_capacity(Self::CAP, raw));
-
-            RefCell::new(buffered_decoder)
+        input: Box<dyn AsyncBufRead + Unpin>,
+        output: Box<dyn Write>,
+        decoder_options: Option<DecoderOptions>,
+        continue_on_decoder_error: bool,
+        stop_requested: Arc<AtomicBool>,
+    ) -> io::Result<Self> {
+        let decoder = match decoder_options {
+            Some(options) => match StreamDecoder::new(options) {
+                Ok(raw) => Some(BufReader::with_capacity(
+                    Self::DECODER_BUFFER_CAPACITY,
+                    AllowStdIo::new(raw),
+                )),
+                Err(error) if continue_on_decoder_error => {
+                    warn!("Failed to initialize the decoder ({error}). Falling back to pass-through mode.");
+                    None
+                }
+                Err(error) => {
+                    return Err(io::Error::new(io::ErrorKind::Other, error));
+                }
+            },
+            None => None,
         };
 
-        let o = AllowStdIo::new(o);
-
-        let abort: Arc<AtomicBool> = Default::default();
-        let weak = Arc::downgrade(&abort);
-        ctrlc::set_handler(move || {
-            if let Some(ptr) = weak.upgrade() {
-                ptr.store(true, Ordering::Relaxed)
-            }
+        Ok(Self {
+            input,
+            output: AllowStdIo::new(output),
+            decoder: RefCell::new(decoder),
+            written: 0,
+            finalize_reason: None,
+            stop_requested,
+            decoder_fallback: continue_on_decoder_error,
+            decoder_disabled: false,
+            progress_callback: None,
+            last_progress: 0,
         })
-        .expect("Error setting Ctrl-C handler");
+    }
 
-        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
-        (
-            Self {
-                i,
-                o,
-                dec,
-                amt: 0,
-                abort,
-                progress_tx,
-                abandon_decoder: if continue_on_error { Some(false) } else { None },
-            },
-            progress_rx,
-        )
+    pub fn with_progress_callback(
+        mut self,
+        callback: impl Fn(u64) + Send + Sync + 'static,
+    ) -> Self {
+        self.progress_callback = Some(Arc::new(callback));
+        self
     }
 }
 
-impl Future for AsyncInOutTriple {
-    type Output = io::Result<u64>;
+impl Future for StreamTransfer {
+    type Output = io::Result<TransferReport>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
+        let stop_requested = this.stop_requested.load(Ordering::Relaxed);
+        if stop_requested {
+            *this.finalize_reason = Some(TransferStopReason::Stopped);
+        }
 
-        let _ = this.progress_tx.send(*this.amt);
-
-        match this.dec.get_mut() {
-            Some(ref mut dec) if !this.abandon_decoder.unwrap_or(false) => {
-                //    A.         B.
-                // In -> Decoder -> Out
-                if !this.abort.load(Ordering::Relaxed) {
-                    // A(source)
-                    let buffer = ready!(this.i.as_mut().poll_fill_buf(cx))?;
+        let mut finalize_reason = *this.finalize_reason;
+        if !*this.decoder_disabled {
+            let mut decoder_guard = this.decoder.borrow_mut();
+            if let Some(decoder) = decoder_guard.as_mut() {
+                if finalize_reason.is_none() {
+                    let buffer = ready!(this.input.as_mut().poll_fill_buf(cx))?;
                     if buffer.is_empty() {
-                        // go to finalization
-                        this.abort.store(true, Ordering::Relaxed);
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
+                        finalize_reason = Some(TransferStopReason::InputEof);
+                        *this.finalize_reason = finalize_reason;
                     } else {
-                        // A(sink)
-                        match ready!(Pin::new(&mut *dec).poll_write(cx, buffer)) {
+                        match ready!(Pin::new(decoder).poll_write(cx, buffer)) {
                             Ok(0) => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
-                            Ok(i) => {
-                                *this.amt += i as u64;
-                                this.i.as_mut().consume(i);
+                            Ok(written) => {
+                                *this.written += written as u64;
+                                this.input.as_mut().consume(written);
+                                if let Some(callback) = this.progress_callback.as_ref() {
+                                    if *this.last_progress != *this.written {
+                                        *this.last_progress = *this.written;
+                                        callback(*this.written);
+                                    }
+                                }
+                                cx.waker().wake_by_ref();
+                                return Poll::Pending;
                             }
-                            Err(e) if this.abandon_decoder.is_some() => {
-                                // Enable bypassing a decoder
-                                *this.abandon_decoder = Some(true);
-                                error!("Unexpected failure in the decoder({}).", e);
-                                warn!("Falling back to decoder-less mode...")
+                            Err(error) => {
+                                if *this.decoder_fallback {
+                                    warn!(
+                                        "Unexpected decoder failure ({error}). Falling back to pass-through mode."
+                                    );
+                                    *this.decoder_disabled = true;
+                                    cx.waker().wake_by_ref();
+                                    return Poll::Pending;
+                                } else {
+                                    return Poll::Ready(Err(error));
+                                }
                             }
-                            Err(e) => return Poll::Ready(Err(e)),
-                        }
-                    }
-
-                    // B(source)
-                    let buffer = ready!(Pin::new(&mut *dec).poll_fill_buf(cx))?;
-                    if !buffer.is_empty() {
-                        // B(sink)
-                        let j = ready!(Pin::new(&mut this.o).poll_write(cx, buffer))?;
-                        if j == 0 {
-                            return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
-                        }
-                        Pin::new(&mut *dec).consume(j);
-                    }
-
-                    cx.waker().wake_by_ref();
-                    return Poll::Pending;
-                }
-
-                // Finalize
-                for _ in 1..1000000 {
-                    match this.progress_tx.send(u64::MAX) {
-                        Ok(_) => {}
-                        Err(_) => {
-                            // Most likely due to pressing Ctrl+C
-                            return Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::Interrupted,
-                                "Ctrl+C pressed",
-                            )));
                         }
                     }
                 }
-                info!("Flushing the buffer…");
 
-                // A(sink)
-                ready!(Pin::new(&mut *dec).poll_flush(cx))?;
-                // B(source)
+                info!("Flushing the decoder buffer...");
+                ready!(Pin::new(&mut *decoder).poll_flush(cx))?;
+
                 loop {
-                    match Pin::new(&mut *dec).poll_fill_buf(cx) {
+                    match Pin::new(&mut *decoder).poll_fill_buf(cx) {
                         Poll::Ready(Ok(buffer)) if buffer.is_empty() => {
-                            return Poll::Ready(Ok(*this.amt));
+                            ready!(Pin::new(&mut this.output).poll_flush(cx))?;
+                            let report = TransferReport {
+                                written_bytes: *this.written,
+                                stop_reason: finalize_reason
+                                    .unwrap_or(TransferStopReason::Completed),
+                            };
+                            return Poll::Ready(Ok(report));
                         }
                         Poll::Ready(Ok(buffer)) => {
-                            // B(sink)
-                            let j = ready!(Pin::new(&mut this.o).poll_write(cx, buffer))?;
-                            if j == 0 {
+                            let bytes = ready!(Pin::new(&mut this.output).poll_write(cx, buffer))?;
+                            if bytes == 0 {
                                 return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
                             }
-                            Pin::new(&mut *dec).consume(j);
+                            Pin::new(&mut *decoder).consume(bytes);
+                            *this.written += bytes as u64;
+                            if let Some(callback) = this.progress_callback.as_ref() {
+                                if *this.last_progress != *this.written {
+                                    *this.last_progress = *this.written;
+                                    callback(*this.written);
+                                }
+                            }
                         }
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Pending => continue,
                     }
                 }
             }
-            _ => {
-                // pass through
-                let buffer = ready!(this.i.as_mut().poll_fill_buf(cx))?;
-                if buffer.is_empty() || this.abort.load(Ordering::Relaxed) {
-                    ready!(Pin::new(&mut this.o).poll_flush(cx))?;
-                    return Poll::Ready(Ok(*this.amt));
-                }
+        }
 
-                let i = ready!(Pin::new(&mut this.o).poll_write(cx, buffer))?;
-                if i == 0 {
-                    return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
-                }
-                *this.amt += i as u64;
-                this.i.as_mut().consume(i);
+        let buffer = ready!(this.input.as_mut().poll_fill_buf(cx))?;
+        if buffer.is_empty() {
+            ready!(Pin::new(&mut this.output).poll_flush(cx))?;
+            let report = TransferReport {
+                written_bytes: *this.written,
+                stop_reason: finalize_reason.unwrap_or(TransferStopReason::InputEof),
+            };
+            return Poll::Ready(Ok(report));
+        }
 
-                cx.waker().wake_by_ref();
-                Poll::Pending
+        let bytes = ready!(Pin::new(&mut this.output).poll_write(cx, buffer))?;
+        if bytes == 0 {
+            return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+        }
+        *this.written += bytes as u64;
+        this.input.as_mut().consume(bytes);
+        if let Some(callback) = this.progress_callback.as_ref() {
+            if *this.last_progress != *this.written {
+                *this.last_progress = *this.written;
+                callback(*this.written);
             }
         }
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 }

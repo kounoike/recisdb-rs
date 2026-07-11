@@ -93,7 +93,9 @@ impl UnTunedTuner {
             ManuallyDrop::new(i_bon)
         };
 
-        interface.OpenTuner()?;
+        interface.OpenTuner().map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("OpenTuner() failed: {e}"))
+        })?;
 
         Ok(Self {
             inner: BufReader::with_capacity(

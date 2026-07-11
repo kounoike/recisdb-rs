@@ -213,9 +213,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chrono"
-version = "0.4.43"
+version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fac4744fb15ae8337dc853fee7fb3f4e48c0fbaa23d0afe49c447b4fab126118"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
  "js-sys",
@@ -315,7 +315,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -472,7 +472,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -898,26 +898,36 @@ dependencies = [
  "b25-sys",
  "bindgen",
  "cc",
- "chrono",
- "clap",
- "clap-num",
- "colored",
  "cpp_utils",
- "ctrlc",
  "dvbv5",
  "dvbv5-sys",
- "env_logger",
- "futures-executor",
- "futures-time",
  "futures-util",
  "glob",
- "indicatif",
  "libc",
  "libloading",
  "log",
  "nix 0.29.0",
  "nom",
  "pin-project-lite",
+]
+
+[[package]]
+name = "recisdb-cli"
+version = "1.2.4"
+dependencies = [
+ "b25-sys",
+ "chrono",
+ "clap",
+ "clap-num",
+ "colored",
+ "ctrlc",
+ "env_logger",
+ "futures-executor",
+ "futures-time",
+ "futures-util",
+ "indicatif",
+ "log",
+ "recisdb",
 ]
 
 [[package]]
@@ -965,7 +975,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

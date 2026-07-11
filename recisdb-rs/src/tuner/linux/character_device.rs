@@ -1,3 +1,4 @@
+use std::convert::TryInto;
 use std::fs::File;
 use std::os::fd::{AsRawFd, RawFd};
 use std::pin::Pin;
@@ -40,7 +41,8 @@ impl UnTunedTuner {
         // concurrent read + ioctl from different threads.
         let ioctl_file = self.file.try_clone()?;
 
-        let _errno = unsafe { set_ch(ioctl_file.as_raw_fd(), &ch.ch_type.clone().into())? };
+        let freq: IoctlFreq = ch.ch_type.clone().try_into()?;
+        let _errno = unsafe { set_ch(ioctl_file.as_raw_fd(), &freq)? };
 
         let _errno = match lnb {
             Some(Voltage::_11v) => unsafe { ptx_enable_lnb(ioctl_file.as_raw_fd(), 1)? },
@@ -147,8 +149,10 @@ impl Tuner {
             }
         }
     }
+    #[allow(dead_code)]
     fn tune(mut self, ch: Channel, lnb: Option<Voltage>) -> Result<Tuner, std::io::Error> {
-        let _errno = unsafe { set_ch(self.ioctl_file.as_raw_fd(), &ch.ch_type.clone().into())? };
+        let freq: IoctlFreq = ch.ch_type.clone().try_into()?;
+        let _errno = unsafe { set_ch(self.ioctl_file.as_raw_fd(), &freq)? };
 
         let _errno = match lnb {
             Some(Voltage::_11v) => unsafe { ptx_enable_lnb(self.ioctl_file.as_raw_fd(), 1)? },

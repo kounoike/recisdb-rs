@@ -1,10 +1,11 @@
 use crate::channels::representation::TsFilter::{AbsTsId, AsIs, RelTsNum};
-pub(crate) use crate::channels::representation::{ChannelSpace, ChannelType};
+pub use crate::channels::representation::{ChannelSpace, ChannelType, TsFilter};
 use log::{error, warn};
 
 pub mod output {
     use crate::channels::representation::{ChannelType, TsFilter};
-    use log::error;
+    use std::convert::TryFrom;
+    use std::io::{Error, ErrorKind};
 
     #[repr(C)]
     #[allow(dead_code)]
@@ -13,8 +14,10 @@ pub mod output {
         pub slot: i32,
     }
 
-    impl From<ChannelType> for IoctlFreq {
-        fn from(value: ChannelType) -> Self {
+    impl TryFrom<ChannelType> for IoctlFreq {
+        type Error = Error;
+
+        fn try_from(value: ChannelType) -> Result<Self, Self::Error> {
             const OFFSET_HZ: i32 = 0;
 
             let ioctl_channel = match &value {
@@ -29,10 +32,14 @@ pub mod output {
                 }
 
                 ChannelType::BonCh(_) | ChannelType::BonChSpace(_) => {
-                    error!("{:?} is not supported in Linux.", value);
-                    std::process::exit(-1)
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        format!("{:?} is not supported in Linux.", value),
+                    ));
                 }
-                _ => unreachable!("Invalid channel."),
+                _ => {
+                    return Err(Error::new(ErrorKind::InvalidInput, "Invalid channel."));
+                }
             };
             let slot = match value {
                 ChannelType::CS(_, TsFilter::AbsTsId(stream_id)) => stream_id as i32,
@@ -44,10 +51,10 @@ pub mod output {
                 _ => OFFSET_HZ,
             };
 
-            Self {
+            Ok(Self {
                 ch: ioctl_channel as i32,
                 slot,
-            }
+            })
         }
     }
 
@@ -56,9 +63,11 @@ pub mod output {
         pub stream_id: Option<u32>,
     }
 
-    impl From<ChannelType> for DvbFreq {
-        fn from(value: ChannelType) -> Self {
-            let freq: IoctlFreq = value.clone().into();
+    impl TryFrom<ChannelType> for DvbFreq {
+        type Error = Error;
+
+        fn try_from(value: ChannelType) -> Result<Self, Self::Error> {
+            let freq: IoctlFreq = value.clone().try_into()?;
 
             let hz: u32 = match &value {
                 ChannelType::Terrestrial(ch_num, ..) => {
@@ -93,10 +102,12 @@ pub mod output {
                 }
 
                 ChannelType::BonCh(_) | ChannelType::BonChSpace(_) => {
-                    error!("{:?} is not supported in Linux.", value);
-                    std::process::exit(-1)
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        format!("{:?} is not supported in Linux.", value),
+                    ));
                 }
-                _ => unreachable!("Invalid channel."),
+                _ => return Err(Error::new(ErrorKind::InvalidInput, "Invalid channel.")),
             };
 
             let stream_id = match value {
@@ -106,13 +117,13 @@ pub mod output {
                 ChannelType::BS(_, TsFilter::AbsTsId(id))
                 | ChannelType::CS(_, TsFilter::AbsTsId(id)) => Some(id),
                 ChannelType::BS(_, TsFilter::RelTsNum(id)) if id < 12 => Some(id as u32),
-                _ => unreachable!(),
+                _ => return Err(Error::new(ErrorKind::InvalidInput, "Invalid channel.")),
             };
 
-            Self {
+            Ok(Self {
                 freq_hz: hz,
                 stream_id,
-            }
+            })
         }
     }
 }
@@ -182,6 +193,7 @@ mod parser {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Channel {
     pub ch_type: ChannelType,
     raw_string: String,
@@ -486,7 +498,7 @@ mod tests {
     fn ch_to_ioctl_freq() {
         let ch_str = "T18";
         let ch = Channel::new(ch_str, None);
-        let freq: IoctlFreq = ch.ch_type.into();
+        let freq: IoctlFreq = ch.ch_type.try_into().unwrap();
         assert_eq!(freq.ch, 68);
         assert_eq!(freq.slot, 0);
     }

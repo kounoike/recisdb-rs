@@ -1,9 +1,13 @@
 use crate::channels::Channel;
 use crate::tuner::{Tunable, Voltage};
 use futures_util::{AsyncBufRead, AsyncRead};
+#[cfg(feature = "dvb")]
 use nom::bytes::complete::tag;
+#[cfg(feature = "dvb")]
 use nom::character::complete::u8;
+#[cfg(feature = "dvb")]
 use nom::sequence::separated_pair;
+#[cfg(feature = "dvb")]
 use nom::IResult;
 use std::io::Error;
 use std::pin::Pin;
@@ -20,6 +24,7 @@ pub enum UnTunedTuner {
     Character(character_device::UnTunedTuner),
 }
 impl UnTunedTuner {
+    #[cfg(feature = "dvb")]
     fn dvb_device_parser(input: &str) -> IResult<&str, (u8, u8)> {
         separated_pair(u8, tag("|"), u8)(input)
     }

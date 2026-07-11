@@ -2,7 +2,8 @@
 resolver = "2"
 members = [
   "b25-sys",
-  "recisdb-rs"
+  "recisdb-rs",
+  "recisdb-cli"
 ]
 
 [patch.crates-io]
